@@ -1,0 +1,469 @@
+#!/usr/bin/env bash
+
+set -u
+
+_progname="$(basename $0)"
+_version="1.0.0"
+
+function _getoptions_help() {
+	cat >&2 <<EOF
+$(basename $0): parse options, version $_version
+
+SYNOPSIS
+	getoptions <optstring> <parameters>
+	getoptions [options] [--] <optstring> [parameters]
+	getoptions [options] -o|--options <optstring> [options] [--] [parameters]
+
+    Options:
+	-o, --options optstring
+		The options to be recognized. If this option is not found, the
+		first parameter of getoptions that does not start with a '-' will
+		be used as the optstring. If the first character of optstring is a
+		colon, silent error reporting is used. If an option is followed by
+		a colon, it is expected to have an argument. If an option is
+		followed by two colons, or a colon and a question mark (:?), its
+		argument is optional and will default to "-" if omitted. If an
+		option is followed by a colon and an asterisk (:*), it is expected
+		to take zero or more arguments and will default to "-" if these are
+		omitted. An option that is followed by a colon and a plus (:+) is
+		expected to take one or more arguments. If an option is followed
+		by an exclamation point (!), it is expected to be boolean. If an
+		option haracter is followed by a pipe character then the long option
+		name should follow next, with any colon or exclamation point coming
+		after that. Any options not followed a colon or an exclamation point,
+		may be separated from other options by a comma. Where they exist,
+		options are recognised by their longest form. When in use, long
+		options may be abbreviated to the shortest unique string, and long
+		boolean options may also be negated by prefixing the option name
+		with "no-" or "no". Any option taking a value may do so from the
+		next parameter or the option and value may be separated by an
+		equal sign (=).
+
+		The <optstring> Grammar:
+
+			<optstring> ::= [ ":" ] <option-list>
+
+			<option-list> ::= <option> [ [ <separator> ] <option> ... ]
+			
+			<separator> ::= "" | "," | /[:space:]/
+				; never use "" between long and then short options,
+				; rather use space or a comma.
+			
+			<option> ::= <identifier> [ <sigil> ]
+			
+			<sigil> ::= "" | "!" | ":" [ <quantifier> ]
+				; ""  signifies option takes no value;
+				; "!" signifies option is boolean;
+				; ":" signifies may option consume value(s).
+			
+			<quantifier> ::= "" | ":" | "?" | "*" | "+"
+				; ""  expected single value
+				; ":" optional single value
+				; "?" also optional single value
+				; "*" zero or more values
+				; "+" one or more values
+			
+			<identifier> ::= <short> | [ [ <short> ] "|" <long> ]
+			
+			<short> ::= /[A-Za-z0-9]/
+			
+			<long> ::= /[A-Za-z0-9][A-Za-z0-9_-]+/
+
+	-q, --quiet
+		Disable error reporting.
+
+	-n, --name progname
+		The name that will be used by the getoptions when it reports
+		errors. Note that errors of getoptions are still reported as
+		coming from getoptions.
+
+	-f	Disable filename expansion (globbing). Filename expansion is enabled
+		by default. If the caller requires "*" to be preserved (e.g. as part
+		of a SELECT * query to be passed to a database) then be sure to use
+		this option when calling getoptions or the "*" will be expanded.
+
+	-B	Disable brace expansion (left enabled by default). If the caller
+		requires "{...}" to be preserved (e.g. awk statements) then be
+		sure to use this option when calling getoptions.
+
+	-h, --help
+		Display this usage information.
+
+	-V, --version
+		Display version information.
+
+DESCRIPTION
+	getoptions is used to break up (parse) options in command lines for
+	easy parsing by shell procedures, and to check for legal options.
+	
+	I wrote this script because the built-in getopts does not deal with
+	long options, but nor does the external getopt tool that ships with
+	macOS. This script is designed to be a drop-in replacement for the
+	built-in getopts command, and to be compatible with the Gnu getopt
+	tool albeit a little more flexible and versatile.
+
+	When the script is called, it will parse the options and arguments
+	according to the optstring and parameters provided. The options will
+	be parsed and the arguments will be left in the positional parameters
+	for further processing by the caller.
+
+EXAMPLES
+	"ab:c"
+	"a,b:c"
+		a b and c represent single character options, with b requiring an
+		argument. The options are parsed as -a -b value -c.
+
+		getoptions -o "ab:c" -- -a -b value -c 1 2 3
+		# output: -a -b value -c -- 1 2 3
+
+	"v|verbose!"
+		-v and --verbose are both recognised as the same option, and
+		are expected to be boolean. Options with a long-form are always
+		represented by the long-form in the output. Boolean options
+		are very versatile and can be used in many ways.
+
+		getoptions -o 'v|verbose!' -- -v -- 1 2 3
+		getoptions -o 'v|verbose!' -- -v+ -- 1 2 3
+		getoptions -o 'v|verbose!' -- -von -- 1 2 3
+		getoptions -o 'v|verbose!' -- -v=yes -- 1 2 3
+		# output: --verbose true -- 1 2 3
+
+		getoptions -o 'v|verbose!' -- --verbose -- 1 2 3
+		# output: --verbose true -- 1 2 3
+
+		getoptions -o 'v|verbose!' -- -v {0|off|false|no} -- 1 2 3
+		getoptions -o 'v|verbose!' -- -v- -- 1 2 3
+		getoptions -o 'v|verbose!' -- -voff -- 1 2 3
+		getoptions -o 'v|verbose!' -- -v=no -- 1 2 3
+		getoptions -o 'v|verbose!' -- --verbose {0|off|false|no} -- 1 2 3
+		getoptions -o 'v|verbose!' -- --no-verbose -- 1 2 3
+		# output: --verbose false -- 1 2 3
+
+	"f::" or "f:?"
+		The option is be parsed as -f [value] since the double-colon
+		indicates an optional value.
+
+		getoptions 'x::' -x 1 2 3
+		# output: -x 1 -- 2 3
+
+
+		getoptions -o 'x::' -- -x -- 1 2 3
+		# output: -x - -- 1 2 3
+
+	"f:*"
+		The option is be parsed as -f [value [value2] ... [value-n]].
+
+		getoptions 'x:*' -x 1 2 3
+		# output: -x "1 2 3" --
+
+
+		getoptions -o 'x:*' -- -x -- 1 2 3
+		# output: -x - -- 1 2 3
+
+	"f:+"
+		The option is be parsed as -f value [value2 ... [value-n]].
+
+		getoptions 'x:+' -x 1 2 3
+		# output: -x "1 2 3" --
+
+
+		getoptions -o 'x:+' -- -x -- 1 2 3
+		# output:
+		# getoptions: option requires a parameter -- -x
+		# -? -x - -- 1 2 3
+
+AUTHOR
+  	Iain Campbell
+EOF
+	exit 1
+}
+
+function _getoptions_usage() {
+	cat >&2 <<EOF
+$(basename $0): parse options, version $_version
+
+USAGE
+	getoptions optstring parameters
+	getoptions [options] [--] optstring parameters
+	getoptions [options] -o | --options optstring [options] [--] parameters
+
+    Options:
+	-o, --options optstring
+	-q, --quiet
+	-n, --name progname
+	-B
+	-f
+	-V, --version
+	-h, --help
+EOF
+	exit 1
+}
+
+function _getoptions_illegal_option() {
+	[[ $_optquiet != 1 ]] && echo $_progname: illegal option -- $1 >&2
+}
+
+function _getoptions_requires_parameter () {
+	[[ $_optquiet != 1 ]] && echo $_progname: option requires a parameter -- $1 >&2
+}
+
+function _getoptions_requires_bool_parameter () {
+	[[ $_optquiet != 1 ]] && echo $_progname: option requires a boolean parameter -- $1 >&2
+}
+
+function _getoptions_dress() {
+	local _xs="$@"
+	if [[ $_xs =~ [[:blank:]] ]]; then
+		echo "\"$_xs\""
+	else
+		echo "$_xs"
+	fi
+}
+
+_opt=
+_optstr=
+_optquiet=
+
+while [[ $# -gt 0 ]]; do
+	if [[ ${1:0:1} == "-" ]]; then
+		_opt="$1"
+		case "$_opt" in
+			-o|--options)
+				shift
+				if [[ -z "$1" ]] || [[ ${1:0:1} == "-" ]]; then
+					echo $(basename $0): option requires an argument -- $_opt
+					exit 1
+				fi
+				_optstr="$1"
+				shift
+				;;
+			-B)
+				shift
+				set -B
+				;;
+			-f)
+				shift
+				set -f
+				;;
+			-n|--name)
+				shift
+				if [[ -z "$1" ]] || [[ ${1:0:1} == "-" ]]; then
+					echo $(basename $0): option requires an argument -- $_opt
+					exit 1
+				fi
+				_progname="$1"
+				shift
+				;;
+			-q|--quiet)
+				shift
+				_optquiet=1
+				;;
+			-V|--version)
+				shift
+				echo $(basename $0): parse options, version $_version >&2
+				exit 0
+				;;
+			-h)
+				shift
+				_getoptions_usage
+				exit 0
+				;;
+			--help)
+				shift
+				_getoptions_help
+				exit 0
+				;;
+			--)
+				shift
+				break
+				;;
+			*)
+				break
+				;;
+		esac
+	else
+		if [[ -z "$_optstr" ]]; then
+			_optstr=$1
+			shift
+		else
+			break
+		fi
+	fi
+done
+
+if [[ -z $_optstr ]]; then
+	if [[ $# -gt 0 ]]; then
+		_optstr=$1
+		shift
+		[[ ${1:-} == "--" ]] && shift
+	else
+		_getoptions_usage
+	fi
+fi
+
+[[ ${_optstr:0:1} == ":" ]] && _optquiet=1
+
+_optarg=
+_boolopt=
+_type=
+_option=
+_opts=()
+_args=()
+
+while [[ $# -gt 0 ]]; do
+	if [[ ${1:0:2} == "--" ]]; then
+		if [[ ${#1} -eq 2 ]]; then
+			shift
+			break
+		fi
+		_opt="${1:2}"
+		_optarg=
+		if [[ $_opt =~ ^(.+)=(.+)$ ]]; then
+			_opt="${BASH_REMATCH[1]}"
+			_optarg="${BASH_REMATCH[2]}"
+		elif [[ $_opt =~ ^no-?(.+)$ ]]; then
+			_boolopt=${BASH_REMATCH[1]}
+			if [[ $_optstr =~ (^|[!:?*+,])([A-Za-z0-9]*\|)?($_boolopt[A-Za-z0-9_-]*)[!] ]]; then
+				_opt="$_boolopt"
+				_optarg=false
+			fi
+		fi
+		if [[ $_optstr =~ (^|[!:?*+,[:space:]])([A-Za-z0-9]*\|)?($_opt[A-Za-z0-9_-]*)([!,[:space:]]|:[:?*+]?|$) ]]; then
+			_option="--${BASH_REMATCH[3]}"
+			_type="${BASH_REMATCH[4]}"
+			if [[ ${_type:0:1} == ":" ]]; then
+				if [[ -z $_optarg ]]; then
+					if [[ -z ${2:-} ]] || [[ ${2:0:1} == "-" ]]; then
+						if [[ ${_type:1:1} =~ [:?*] ]]; then
+							_optarg="-"
+						else
+							_option="-?"
+							_optarg="--$_opt"
+							_getoptions_requires_parameter $_optarg
+						fi
+					else
+						_optarg="$2"
+						shift
+					fi
+					if [[ ${_type:1:1} =~ [*+] ]]; then
+						while [[ -n ${2:-} ]] && [[ ${2:0:1} != "-" ]]; do
+							_optarg="$_optarg $2"
+							shift
+						done
+					fi
+				fi
+				_opts+=($_option "$(_getoptions_dress $_optarg)")
+			elif [[ $_type == "!" ]]; then
+				if [[ -z $_optarg ]]; then
+					_optarg=true
+				else
+					if [[ ${_optarg,,} =~ ^(1|t|j|y|д|і|on|yes|true)$ ]]; then
+						_optarg=true
+					elif [[ ${_optarg,,} =~ ^(0|f|n|н|ф|no|off|false)$ ]]; then
+						_optarg=false
+					else
+						_option="-?"
+						_optarg="--$_opt"
+						_getoptions_requires_bool_parameter $_optarg
+					fi
+				fi
+				_opts+=($_option "$(_getoptions_dress $_optarg)")
+			else
+				_opts+=("$_option")
+			fi
+		else
+			_opts+=("-?" "--$_opt")
+			_getoptions_illegal_option "--$_opt"
+		fi
+		shift
+		continue
+	fi
+	if [[ ${1:0:1} == "-" ]]; then
+		if [[ ${#1} -eq 1 ]]; then
+			shift
+			break
+		fi
+		_opt=${1:1:1}
+		if [[ $_optstr =~ (^|[!:?*+,[:space:]])[A-Za-z0-9]*$_opt(\|([A-Za-z0-9_-]*)|[A-Za-z0-9_-]*)?([!,[:space:]]|:[:?*+]?|$) ]]; then
+			_option=${BASH_REMATCH[3]}
+			_type=${BASH_REMATCH[4]}
+			if [[ -n "$_option" ]]; then
+				_option="--$_option"
+			else
+				_option="-$_opt"
+			fi
+			if [[ ${_type:0:1} == ":" ]]; then
+				if [[ ${#1} -eq 2 ]]; then
+					if [[ -z ${2:-} ]] || [[ ${2:0:1} == "-" && ${#2} -gt 1 ]]; then
+						if [[ ${_type:1:1} =~ [:?*] ]]; then
+							_optarg="-"
+						else
+							_option="-?"
+							_optarg="-$_opt"
+							_getoptions_requires_parameter $_optarg
+						fi
+					else
+						_optarg="$2"
+						shift
+					fi
+					if [[ ${_type:1:1} =~ [*+] ]]; then
+						while [[ -n ${2:-} ]] && [[ ${2:0:1} != "-" ]]; do
+							_optarg="$_optarg $2"
+							shift
+						done
+					fi
+				else
+					if [[ ${1:2:1} == "=" ]]; then
+						_optarg="${1:3}"
+					else
+						_optarg="${1:2}"
+					fi
+					[[ -z $_optarg ]] && _optarg="-"
+				fi
+				_opts+=($_option "$(_getoptions_dress $_optarg)")
+			elif [[ $_type == "!" ]]; then
+				if [[ ${#1} -eq 2 ]]; then
+					_optarg=true
+				else
+					_optarg=${1:2}
+				fi
+				if [[ ${_optarg,,} =~ ^([+]|=?(1|t|j|y|д|і|on|yes|true))$ ]]; then
+					_optarg=true
+				elif [[ ${_optarg,,} =~ ^([-]|=?(0|f|n|н|ф|no|off|false))$ ]]; then
+					_optarg=false
+				else
+					_option="-?"
+					_optarg="-$_opt"
+					_getoptions_requires_bool_parameter $_optarg
+				fi
+				_opts+=($_option "$(_getoptions_dress $_optarg)")
+			else
+				_opts+=("$_option")
+				if [[ ${#1} -gt 2 ]]; then
+					# compund option character, trim left and try next character immediately...
+					if [[ $# -gt 1 ]]; then
+						set -- "-${1:2}" "${@:2}"
+					else
+						set -- "-${1:2}"
+					fi
+					continue
+				fi
+			fi
+		else
+			_opts+=("-?" "-$_opt")
+			_getoptions_illegal_option "--$_opt"
+		fi
+		shift
+		continue
+	fi
+	_args+=("$(_getoptions_dress $1)")
+	shift
+done
+
+while [[ $# -gt 0 ]]; do
+	_args+=("$(_getoptions_dress $1)")
+	shift
+done
+
+echo ${_opts[@]} "--" ${_args[@]}
+exit 0
